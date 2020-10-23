@@ -631,17 +631,17 @@ function insertionsAfter(opSet, objectId, parentId, childId) {
     .map(op => op.get('opId'))
 }
 
-function movesAfter(opSet, objectId, parentId, childId) {
-  let childKey = null
-  if (childId) childKey = Map({opId: childId})
-
-  return opSet
-      .getIn(['byObject', objectId, '_movedAfter', parentId], List())
-      .filter(op => op.get('move') && (!childKey || lamportCompare(op, childKey) < 0))
-      .sort(lamportCompare)
-      .reverse() // descending order
-      .map(op => op.get('opId'))
-}
+// function movesAfter(opSet, objectId, parentId, childId) {
+//   let childKey = null
+//   if (childId) childKey = Map({opId: childId})
+//
+//   return opSet
+//       .getIn(['byObject', objectId, '_movedAfter', parentId], List())
+//       .filter(op => op.get('move') && (!childKey || lamportCompare(op, childKey) < 0))
+//       .sort(lamportCompare)
+//       .reverse() // descending order
+//       .map(op => op.get('opId'))
+// }
 
 function getNext(opSet, objectId, key) {
   const children = insertionsAfter(opSet, objectId, key)
@@ -661,30 +661,12 @@ function getNext(opSet, objectId, key) {
 // or null if the given list element is at the head.
 function getPrevious(opSet, objectId, key) {
   // id after which was originally inserted
-  // TODO rename, if "parent" is supposed to mean "inserted after"
-  let parentId = getParent(opSet, objectId, key)
-  // if element with parentId was moved, skip to element before
-  while (true) {
-    const moves = movesAfter(opSet, objectId, parentId)
-    const moved = !moves.isEmpty()
-    if (!moved) {
-      break
-    }
-    const beforeParent = getPrevious(opSet, objectId, parentId)
-    // potentially the element can be moved around several times (or even just once)
-    // and end up in the same spot again
-    const moveOp = moves.last()
-    if (moveOp.key === beforeParent) {
-      break
-    }
-
-    parentId = beforeParent
-  }
+  const parentId = getParent(opSet, objectId, key)
 
   // other insertions after the parent in lamport order
   let children = insertionsAfter(opSet, objectId, parentId)
   if (children.first() === key) {
-    // the first element after the parent is key -> parentId is previous
+    // the first element after the parent equals key -> parentId is previous
     if (parentId === '_head') return null; else return parentId;
   }
 
@@ -700,6 +682,50 @@ function getPrevious(opSet, objectId, key) {
     prevId = children.last()
   }
 }
+
+// // Given the ID of a list element, returns the ID of the immediate predecessor list element,
+// // or null if the given list element is at the head.
+// function getPrevious(opSet, objectId, key) {
+//   // id after which was originally inserted
+//   // TODO rename, if "parent" is supposed to mean "inserted after"
+//   let parentId = getParent(opSet, objectId, key)
+//   // if element with parentId was moved, skip to element before
+//   while (true) {
+//     const moves = movesAfter(opSet, objectId, parentId)
+//     const moved = !moves.isEmpty()
+//     if (!moved) {
+//       break
+//     }
+//     const beforeParent = getPrevious(opSet, objectId, parentId)
+//     // potentially the element can be moved around several times (or even just once)
+//     // and end up in the same spot again
+//     const moveOp = moves.last()
+//     if (moveOp.key === beforeParent) {
+//       break
+//     }
+//
+//     parentId = beforeParent
+//   }
+//
+//   // other insertions after the parent in lamport order
+//   let children = insertionsAfter(opSet, objectId, parentId)
+//   if (children.first() === key) {
+//     // the first element after the parent is key -> parentId is previous
+//     if (parentId === '_head') return null; else return parentId;
+//   }
+//
+//   // concurrent insertion
+//   let prevId
+//   for (let child of children) {
+//     if (child === key) break
+//     prevId = child
+//   }
+//   while (true) {
+//     children = insertionsAfter(opSet, objectId, prevId)
+//     if (children.isEmpty()) return prevId
+//     prevId = children.last()
+//   }
+// }
 
 function constructField(opSet, op) {
   if (isChildOp(op)) {

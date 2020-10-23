@@ -90,11 +90,6 @@ function processChangeRequest(state, opSet, request, startOp) {
         const value = elemIds[op.obj].valueOf(op.child)
         elemIds[op.obj] = elemIds[op.obj].removeKey(op.child)
 
-        // key is after child, but child is removed first, so idxKey is decreased by 1
-        // if (idxKey > idxChild) {
-        //   idxKey--
-        // }
-
         if (idxKey === 0) {
           op.key = '_head'
           elemIds[op.obj] = elemIds[op.obj].insertAfter(null, opId)
