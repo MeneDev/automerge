@@ -71,7 +71,7 @@ function applyInsert(opSet, op) {
 }
 
 function applyMove(opSet, op, patch) {
-  const objectId = op.get('obj'), opId = op.get('opId'), key = op.get('key'), child = op.get('child')
+  const objectId = op.get('obj'), opId = op.get('opId')
   if (!opSet.get('byObject').has(objectId)) throw new Error(`Modification of unknown object ${objectId}`)
   if (opSet.hasIn(['byObject', objectId, '_insertion', opId])) throw new Error(`Duplicate list element ID ${opId}`)
 
@@ -82,28 +82,73 @@ function applyMove(opSet, op, patch) {
     patch.props = {}
   }
 
-  let elemIds = opSet.getIn(['byObject', objectId, '_elemIds'])
+  const moves = List(opSet.getIn(['byObject', objectId, '_move'], Map()).values()).sort(lamportCompare)
+  const movesAfter = moves.skipUntil(other => lamportCompare(op, other) > 0)
 
-  let idxKey = key === '_head' ? -1 : elemIds.indexOf(key)
+  let elemIds = opSet.getIn(['byObject', objectId, '_elemIds'], false)
 
-  let idxChild = elemIds.indexOf(child)
-  let valChild = elemIds.getValue(child)
-  elemIds = elemIds.removeIndex(idxChild)
-  if (patch) patch.edits.push({action: 'remove', index: idxChild})
-  if (idxKey < idxChild) {
-    idxKey++
-  }
-  elemIds = elemIds.insertIndex(idxKey, child, valChild)
-  if (patch) patch.edits.push({action: 'insert', index: idxKey})
-
-  patch.props[idxKey] = {}
-  patch.props[idxKey][opId] = {value: valChild}
+  // undo all moves in movesAfter, reverse order
+  elemIds = movesAfter.reduceRight((elemIds, op) => _applyMove(opId, elemIds, op, patch, true), elemIds)
+  // apply op
+  elemIds = _applyMove(opId, elemIds, op, patch, false)
+  // apply undone moves again
+  elemIds = movesAfter.reduce((elemIds, op) => _applyMove(opId, elemIds, op, patch, false), elemIds)
 
   return opSet
       .setIn(['byObject', objectId, '_elemIds'], elemIds)
-      // TODO needed?
-      .updateIn(['byObject', objectId, '_movedAfter', op.get('key')], List(), list => list.push(op))
       .setIn(['byObject', objectId, '_move', opId], op)
+}
+
+function _applyMove(opId, elemIds, op, patch, inverse) {
+  const key = op.get('key'), child = op.get('child')
+
+  let dest = inverse ? child : key;
+  let source = inverse ? key : child;
+
+  let idxDest = dest === '_head' ? -1 : elemIds.indexOf(dest)
+
+  let idxSource = elemIds.indexOf(source)
+  let valChild = elemIds.getValue(source)
+
+  elemIds = elemIds.removeIndex(idxSource)
+  if (patch) patch.edits.push({action: 'remove', index: idxSource})
+  if (idxDest < idxSource) {
+    idxDest++
+  }
+
+  if (patch) {
+    let p = {}
+    for (let [key, value] of Object.entries(patch.props)) {
+      key = parseInt(key)
+      if (key <= idxSource) {
+        p[key] = value
+      } else {
+        p[key - 1] = value
+      }
+    }
+    patch.props = p
+  }
+
+  elemIds = elemIds.insertIndex(idxDest, source, valChild)
+  if (patch) patch.edits.push({action: 'insert', index: idxDest})
+
+  if (patch) {
+    let p = {}
+    for (let [key, value] of Object.entries(patch.props)) {
+      key = parseInt(key)
+      if (key < idxDest) {
+        p[key] = value
+      } else {
+        p[key + 1] = value
+      }
+    }
+    patch.props = p
+  }
+
+  patch.props[idxDest] = {}
+  patch.props[idxDest][opId] = {value: valChild}
+
+  return elemIds
 }
 
 function updateListElement(opSet, objectId, elemId, patch) {

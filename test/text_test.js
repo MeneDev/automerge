@@ -259,6 +259,60 @@ describe('Automerge.Text', () => {
     assert.strictEqual(s1.text.get(2), 'b')
   })
 
+  it('should support conflict free simultaneous  moving', () => {
+    s1 = Automerge.change(s1, doc => doc.text.insertAt(0, 'a', 'b', 'c', 'd'))
+    let s2 = Automerge.merge(Automerge.init(), s1)
+    s2 = Automerge.change(s2, doc => doc.text.moveTo(0, 1))
+    s1 = Automerge.change(s1, doc => doc.text.moveTo(2, 3))
+
+    assert.strictEqual(s1.text.length, 4)
+    assert.strictEqual(s1.text.toString(), 'abdc')
+
+    assert.strictEqual(s2.text.length, 4)
+    assert.strictEqual(s2.text.toString(), 'bacd')
+
+    s1 = Automerge.merge(s1, s2)
+    assert.strictEqual(s1.text.length, 4)
+    assert.strictEqual(s1.text.toString(), 'badc')
+
+    s2 = Automerge.merge(s2, s1)
+    assert.strictEqual(s2.text.length, 4)
+    assert.strictEqual(s2.text.toString(), 'badc')
+  })
+
+  it('should support concurrent ambiguous moving', () => {
+    s1 = Automerge.change(s1, doc => doc.text.insertAt(0, 'a', 'b', 'c', 'd'))
+    let s2 = Automerge.merge(Automerge.init(), s1)
+    s1 = Automerge.change(s1, doc => doc.text.moveTo(0, 1))
+
+    assert.strictEqual(s1.text.length, 4)
+    assert.strictEqual(s1.text.toString(), 'bacd')
+
+    s2 = Automerge.change(s2, doc => doc.text.moveTo(1, 2))
+
+    assert.strictEqual(s2.text.length, 4)
+    assert.strictEqual(s2.text.toString(), 'acbd')
+
+    // different sequences lead to different results
+    //    0. abcd
+    //    1. a after b -> bacd
+    //    2. b after c -> acbd
+    // or
+    //    0. abcd
+    //    1. b after c -> acbd
+    //    2. a after b -> cbad
+    // none is more correct than the other, but we need to be deterministic
+    s1 = Automerge.merge(s1, s2)
+    assert.strictEqual(s1.text.length, 4)
+    assertEqualsOneOf(s1.text.toString(), 'acbd', 'cbad')
+
+    s2 = Automerge.merge(s2, s1)
+    assert.strictEqual(s2.text.length, 4)
+    assertEqualsOneOf(s2.text.toString(), 'acbd', 'cbad')
+
+    assert.strictEqual(s1.text.toString(), s2.text.toString())
+  })
+
   it("should support implicit and explicit deletion", () => {
     s1 = Automerge.change(s1, doc => doc.text.insertAt(0, "a", "b", "c"))
     s1 = Automerge.change(s1, doc => doc.text.deleteAt(1))
