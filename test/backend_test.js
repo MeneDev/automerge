@@ -222,6 +222,30 @@ describe('Automerge.Backend', () => {
       })
     })
 
+    it('should handle list element moving', () => {
+      const actor = uuid()
+      const change1 = {actor, seq: 1, startOp: 1, time: 0, deps: [], ops: [
+          {action: 'makeList', obj: ROOT_ID, key: 'birds', pred: []},
+          {action: 'set', obj: `1@${actor}`, key: '_head', insert: true, value: 'a', pred: []},
+          {action: 'set', obj: `1@${actor}`, key: `2@${actor}`, insert: true, value: 'b', pred: []},
+        ]}
+      const change2 = {actor, seq: 2, startOp: 4, time: 0, deps: [hash(change1)], ops: [
+          // move from child to key
+          {action: 'mov', obj: `1@${actor}`, key: '_head', child: `3@${actor}`, pred: [`3@${actor}`]}
+        ]}
+      const s0 = Backend.init()
+      const [s1, patch1] = Backend.applyChanges(s0, [encodeChange(change1)])
+      const [s2, patch2] = Backend.applyChanges(s1, [encodeChange(change2)])
+      assert.deepStrictEqual(patch2, {
+        version: 2, clock: {[actor]: 2}, deps: [hash(change2)], canUndo: false, canRedo: false,
+        diffs: {objectId: ROOT_ID, type: 'map', props: {birds: {[`1@${actor}`]: {
+                objectId: `1@${actor}`, type: 'list', edits: [
+                  {action: 'remove', index: 1}, {action: 'insert', index: 0}
+                ], props: {0: {[`4@${actor}`]: {value: 'b'}}}
+              }}}}
+      })
+    })
+
     it('should handle changes within conflicted objects', () => {
       const actor1 = uuid(), actor2 = uuid()
       const change1 = {actor: actor1, seq: 1, startOp: 1, time: 0, deps: [], ops: [
@@ -471,6 +495,32 @@ describe('Automerge.Backend', () => {
           {obj: '1@111111', action: 'del', key: '2@111111', insert: false, pred: ['2@111111']}
         ]
       }])
+    })
+
+    it('should record preceding move operations in pred', () => {
+      // move operations are not commutative
+      const local1 = {requestType: 'change', actor: '111111', seq: 1, startOp: 1, time: 0, version: 0, ops: [
+          {obj: ROOT_ID, action: 'makeList', key: 'birds'}
+        ]}
+      const local2 = {requestType: 'change', actor: '111111', seq: 2, startOp: 2, time: 0, version: 0, ops: [
+          {obj: '1@111111', action: 'set', key: 0, insert: true, value: 'magpie'},    // 2@111111
+          {obj: '1@111111', action: 'set', key: 1, insert: true, value: 'blackbird'}, // 3@111111
+          {obj: '1@111111', action: 'set', key: 2, insert: true, value: 'cormorant'}, // 4@111111
+          {obj: '1@111111', action: 'mov', child: 0, key: 1},                         // 5@111111
+          {obj: '1@111111', action: 'mov', child: 2, key: 1},                         // 6@111111
+        ]}
+        const local3 = {requestType: 'change', actor: '111111', seq: 3, startOp: 6, time: 0, version: 0, ops: [
+          {obj: '1@111111', action: 'mov', child: 2, key: 0},                         // 7@111111
+        ]}
+      const s0 = Backend.init()
+      const [s1, patch1] = Backend.applyLocalChange(s0, local1)
+      const [s2, patch2] = Backend.applyLocalChange(s1, local2)
+      const [s3, patch3] = Backend.applyLocalChange(s2, local3)
+      const changes = Backend.getChanges(s3, []).map(decodeChange)
+      // TODO is order important here?
+      assert.deepStrictEqual(new Set(changes[1].ops[3].pred), new Set(['2@111111', '3@111111']))
+      assert.deepStrictEqual(new Set(changes[1].ops[4].pred), new Set(['3@111111', '4@111111', '5@111111']))
+      assert.deepStrictEqual(new Set(changes[2].ops[0].pred), new Set(['4@111111', '6@111111']))
     })
   })
 

@@ -21,6 +21,7 @@ function backendState(backend) {
  */
 function fillInPred(opSet, change) {
   let myOps = {} // maps objectId => key => opId
+  let myMoves = {} // maps objectId => [opId1, opId2, …]
   change.ops.forEach((op, index) => {
     const opId = `${change.startOp + index}@${change.actor}`
     const key = op.insert ? opId : op.key
@@ -32,9 +33,35 @@ function fillInPred(opSet, change) {
       op.pred = fieldOps.map(fieldOp => fieldOp.get('opId')).toJS()
     }
 
+    if (op.action === 'mov') {
+      // move operations depend on two elements (key and child)
+      if (myOps[op.obj] && myOps[op.obj][op.child]) {
+        op.pred.push(myOps[op.obj][op.child])
+      } else {
+        const fieldOps = OpSet.getFieldOps(opSet, op.obj, op.child)
+        op.pred = op.pred.concat(fieldOps.map(fieldOp => fieldOp.get('opId')).toJS())
+      }
+
+      // move operations are not commutative and depend on previous move
+      if (!myMoves[op.obj]) myMoves[op.obj] = []
+      const moves = List(opSet.getIn(['byObject', op.obj, '_move'], Map()).values()).map(op => op.get('opId'))
+          .concat(myMoves[op.obj]).sort(lamportCompare)
+      op.pred = op.pred.concat(moves.takeLast(1).toJS())
+      myMoves[op.obj].push(opId)
+    }
+
     if (!myOps[op.obj]) myOps[op.obj] = {}
     if (!myOps[op.obj][key]) myOps[op.obj][key] = opId
   })
+
+  function lamportCompare(opId1, opId2) {
+    const time1 = OpSet.parseOpId(opId1), time2 = OpSet.parseOpId(opId2)
+    if (time1.counter < time2.counter) return -1
+    if (time1.counter > time2.counter) return  1
+    if (time1.actorId < time2.actorId) return -1
+    if (time1.actorId > time2.actorId) return  1
+    return 0
+  }
 }
 
 /**

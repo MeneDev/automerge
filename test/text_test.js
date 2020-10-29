@@ -260,8 +260,9 @@ describe('Automerge.Text', () => {
   })
 
   it('should support conflict free simultaneous  moving', () => {
+    let s1 = Automerge.change(Automerge.init('111111'), doc => doc.text = new Automerge.Text())
     s1 = Automerge.change(s1, doc => doc.text.insertAt(0, 'a', 'b', 'c', 'd'))
-    let s2 = Automerge.merge(Automerge.init(), s1)
+    let s2 = Automerge.merge(Automerge.init('222222'), s1)
     s2 = Automerge.change(s2, doc => doc.text.moveTo(0, 1))
     s1 = Automerge.change(s1, doc => doc.text.moveTo(2, 3))
 
@@ -281,8 +282,9 @@ describe('Automerge.Text', () => {
   })
 
   it('should support concurrent ambiguous moving', () => {
+    let s1 = Automerge.change(Automerge.init('111111'), doc => doc.text = new Automerge.Text())
     s1 = Automerge.change(s1, doc => doc.text.insertAt(0, 'a', 'b', 'c', 'd'))
-    let s2 = Automerge.merge(Automerge.init(), s1)
+    let s2 = Automerge.merge(Automerge.init('222222'), s1)
     s1 = Automerge.change(s1, doc => doc.text.moveTo(0, 1))
 
     assert.strictEqual(s1.text.length, 4)
@@ -293,7 +295,7 @@ describe('Automerge.Text', () => {
     assert.strictEqual(s2.text.length, 4)
     assert.strictEqual(s2.text.toString(), 'acbd')
 
-    // different sequences lead to different results
+    // different order leads to different results
     //    0. abcd
     //    1. a after b -> bacd
     //    2. b after c -> acbd
@@ -309,6 +311,30 @@ describe('Automerge.Text', () => {
     s2 = Automerge.merge(s2, s1)
     assert.strictEqual(s2.text.length, 4)
     assertEqualsOneOf(s2.text.toString(), 'acbd', 'cbad')
+
+    assert.strictEqual(s1.text.toString(), s2.text.toString())
+  })
+
+  it('should support concurrent conflicting moves', () => {
+    s1 = Automerge.change(s1, doc => doc.text.insertAt(0, 'a', 'b', 'c', 'd'))
+    let s2 = Automerge.merge(Automerge.init(), s1)
+    s1 = Automerge.change(s1, doc => doc.text.moveTo(0, 1))
+
+    assert.strictEqual(s1.text.length, 4)
+    assert.strictEqual(s1.text.toString(), 'bacd')
+
+    s2 = Automerge.change(s2, doc => doc.text.moveTo(0, 2))
+
+    assert.strictEqual(s2.text.length, 4)
+    assert.strictEqual(s2.text.toString(), 'bcad')
+
+    s1 = Automerge.merge(s1, s2)
+    assert.strictEqual(s1.text.length, 4)
+    assertEqualsOneOf(s1.text.toString(), 'bacd', 'bcad')
+
+    s2 = Automerge.merge(s2, s1)
+    assert.strictEqual(s2.text.length, 4)
+    assertEqualsOneOf(s2.text.toString(), 'bacd', 'bcad')
 
     assert.strictEqual(s1.text.toString(), s2.text.toString())
   })
