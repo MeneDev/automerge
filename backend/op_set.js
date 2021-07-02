@@ -1,7 +1,7 @@
-const { Map, List, Set, fromJS } = require('immutable')
-const { SkipList } = require('./skip_list')
-const { decodeChange, decodeChangeMeta } = require('./columnar')
-const { ROOT_ID, parseOpId } = require('../src/common')
+const {Map, List, Set, fromJS} = require('immutable')
+const {SkipList} = require('./skip_list')
+const {decodeChange, decodeChangeMeta} = require('./columnar')
+const {ROOT_ID, parseOpId} = require('../src/common')
 
 // Returns true if all changes that causally precede the given change
 // have already been applied in `opSet`.
@@ -66,8 +66,8 @@ function applyInsert(opSet, op) {
   if (opSet.hasIn(['byObject', objectId, '_insertion', opId])) throw new Error(`Duplicate list element ID ${opId}`)
 
   return opSet
-    .updateIn(['byObject', objectId, '_following', op.get('key')], List(), list => list.push(op))
-    .setIn(['byObject', objectId, '_insertion', opId], op)
+      .updateIn(['byObject', objectId, '_following', op.get('key')], List(), list => list.push(op))
+      .setIn(['byObject', objectId, '_insertion', opId], op)
 }
 
 function applyMove(opSet, op, patch) {
@@ -82,18 +82,28 @@ function applyMove(opSet, op, patch) {
     patch.props = {}
   }
 
-  const moves = List(opSet.getIn(['byObject', objectId, '_move'], Map()).values()).sort(lamportCompare)
-  const movesAfter = moves.skipUntil(other => lamportCompare(op, other) > 0)
+  const ops = List(opSet.getIn(['byObject', objectId, '_move'], Map()).values())
+      .concat(List(opSet.getIn(['byObject', objectId, '_insertion'], Map()).values()))
+      .sort(lamportCompare)
+  const opsAfter = ops.skipUntil(other => lamportCompare(op, other) < 0)
 
   let elemIds = opSet.getIn(['byObject', objectId, '_elemIds'], false)
 
   const inserts = []
   // undo all moves in movesAfter, reverse order
-  elemIds = movesAfter.reduceRight((elemIds, op) => _applyMove(opId, elemIds, op, patch, inserts, true), elemIds)
+  elemIds = opsAfter.reduceRight((elemIds, op) =>
+      op.get('action') === 'mov'
+          ? _applyMove(opId, elemIds, op, patch, inserts, true)
+          : _uninsert(opId, elemIds, op, patch, inserts)
+  , elemIds)
   // apply op
   elemIds = _applyMove(opId, elemIds, op, patch, inserts, false)
   // apply undone moves again
-  elemIds = movesAfter.reduce((elemIds, op) => _applyMove(opId, elemIds, op, patch, inserts, false), elemIds)
+  elemIds = opsAfter.reduce((elemIds, op) =>
+          op.get('action') === 'mov'
+              ? _applyMove(opId, elemIds, op, patch, inserts, false)
+              : _reinsert(opSet, objectId, opId, elemIds, op, patch, inserts)
+      , elemIds)
 
   for (let inserted of new Set(inserts)) {
     let val = elemIds.getValue(inserted)
@@ -106,8 +116,32 @@ function applyMove(opSet, op, patch) {
       .setIn(['byObject', objectId, '_elemIds'], elemIds)
       .setIn(['byObject', objectId, '_move', opId], op)
 }
+function _uninsert(opId, elemIds, op, patch, moved, inverse) {
+  const idx = elemIds.indexOf(op.get('opId'))
+  if (patch) patch.edits.push({action: 'remove', index: idx})
+  return elemIds.removeIndex(idx)
+}
 
-function _applyMove(opId, elemIds, op, patch, moved, inverse) {
+function _reinsert(opSet, objectId, opId, elemIds, op, patch, inserts) {
+  const elemId = op.get('opId')
+  let prevId = op.get('key')
+  let index = elemIds.indexOf(prevId)
+  // while (true) {
+  //   index = -1
+  //   prevId = getPrevious(opSet, objectId, prevId)
+  //   if (!prevId) break
+  //   index = elemIds.indexOf(prevId)
+  //   if (index >= 0) break
+  // }
+
+  index += 1
+  if (patch) patch.edits.push({action: 'insert', index})
+
+  inserts.push(elemId)
+  return elemIds.insertIndex(index, elemId, op.get('value'))
+}
+
+function _applyMove(opId, elemIds, op, patch, inserts, inverse) {
   const key = op.get('key'), child = op.get('child')
 
   let dest = inverse ? child : key;
@@ -115,7 +149,7 @@ function _applyMove(opId, elemIds, op, patch, moved, inverse) {
 
   let idxDest = inverse ? elemIds.indexOf(dest) : (dest === '_head' ? -1 : elemIds.indexOf(dest))
 
-  let idxSource = inverse ? (source === '_head' ? -1 : elemIds.indexOf(source)): elemIds.indexOf(source)
+  let idxSource = inverse ? (source === '_head' ? -1 : elemIds.indexOf(source)) : elemIds.indexOf(source)
   let valChild = elemIds.getValue(source)
 
   elemIds = elemIds.removeIndex(idxSource)
@@ -129,7 +163,7 @@ function _applyMove(opId, elemIds, op, patch, moved, inverse) {
 
   if (patch) patch.edits.push({action: 'insert', index: idxDest})
 
-  moved.push(source)
+  inserts.push(source)
   return elemIds
 }
 
@@ -348,8 +382,8 @@ function applyAssign(opSet, op, patch) {
     })
   } else {
     const priorOpsOverwritten = ops.groupBy(other => op.get('pred').includes(other.get('opId')))
-    overwritten = priorOpsOverwritten.get(true,  List())
-    remaining   = priorOpsOverwritten.get(false, List())
+    overwritten = priorOpsOverwritten.get(true, List())
+    remaining = priorOpsOverwritten.get(false, List())
   }
 
   // If any child object references were overwritten, remove them from the index of inbound links
@@ -383,7 +417,7 @@ function initializePatch(opSet, pathOp, patch) {
   const objectId = pathOp.get('obj'), opId = pathOp.get('opId'), key = getOperationKey(pathOp)
   const type = getObjectType(opSet, objectId)
   patch.objectId = patch.objectId || objectId
-  patch.type     = patch.type     || type
+  patch.type = patch.type || type
 
   if (patch.objectId !== objectId) {
     throw new RangeError(`objectId mismatch in path: ${patch.objectId} != ${objectId}`)
@@ -565,11 +599,11 @@ function applyChange(opSet, binaryChange, patch) {
 
   opSet = applyOps(opSet, change, patch)
   return opSet
-    .setIn(['hashes', hash], changeInfo)
-    .updateIn(['states', actor], List(), prior => prior.push(hash))
-    .update('deps', deps => deps.subtract(change.get('deps')).add(hash))
-    .update('maxOp', maxOp => Math.max(maxOp, changeInfo.get('maxOpId')))
-    .update('history', history => history.push(hash))
+      .setIn(['hashes', hash], changeInfo)
+      .updateIn(['states', actor], List(), prior => prior.push(hash))
+      .update('deps', deps => deps.subtract(change.get('deps')).add(hash))
+      .update('maxOp', maxOp => Math.max(maxOp, changeInfo.get('maxOpId')))
+      .update('history', history => history.push(hash))
 }
 
 function applyQueuedOps(opSet, patch) {
@@ -592,28 +626,28 @@ function applyQueuedOps(opSet, patch) {
 function pushUndoHistory(opSet) {
   const undoPos = opSet.get('undoPos')
   return opSet
-    .update('undoStack', stack => {
-      return stack
-        .slice(0, undoPos)
-        .push(opSet.get('undoLocal'))
-    })
-    .set('undoPos', undoPos + 1)
-    .set('redoStack', List())
-    .remove('undoLocal')
+      .update('undoStack', stack => {
+        return stack
+            .slice(0, undoPos)
+            .push(opSet.get('undoLocal'))
+      })
+      .set('undoPos', undoPos + 1)
+      .set('redoStack', List())
+      .remove('undoLocal')
 }
 
 function init() {
   return Map()
-    .set('states',   Map())
-    .set('history',  List())
-    .set('byObject', Map().set(ROOT_ID, Map().set('_keys', Map())))
-    .set('hashes',   Map())
-    .set('deps',     Set())
-    .set('maxOp',     0)
-    .set('undoPos',   0)
-    .set('undoStack', List())
-    .set('redoStack', List())
-    .set('queue',    List())
+      .set('states', Map())
+      .set('history', List())
+      .set('byObject', Map().set(ROOT_ID, Map().set('_keys', Map())))
+      .set('hashes', Map())
+      .set('deps', Set())
+      .set('maxOp', 0)
+      .set('undoPos', 0)
+      .set('undoStack', List())
+      .set('redoStack', List())
+      .set('queue', List())
 }
 
 /**
@@ -668,18 +702,18 @@ function getMissingChanges(opSet, haveDeps) {
   }
 
   return opSet.get('history')
-    .filter(hash => !seenHashes[hash])
-    .map(hash => opSet.getIn(['hashes', hash, 'change']))
-    .toJSON()
+      .filter(hash => !seenHashes[hash])
+      .map(hash => opSet.getIn(['hashes', hash, 'change']))
+      .toJSON()
 }
 
 function getChangesForActor(opSet, forActor, afterSeq) {
   afterSeq = afterSeq || 0
 
   return opSet.getIn(['states', forActor], List())
-    .skip(afterSeq)
-    .map(hash => opSet.getIn(['hashes', hash, 'change']))
-    .toJSON()
+      .skip(afterSeq)
+      .map(hash => opSet.getIn(['hashes', hash, 'change']))
+      .toJSON()
 }
 
 function getMissingDeps(opSet) {
@@ -710,9 +744,9 @@ function getParent(opSet, objectId, key) {
 function lamportCompare(op1, op2) {
   const time1 = parseOpId(op1.get('opId')), time2 = parseOpId(op2.get('opId'))
   if (time1.counter < time2.counter) return -1
-  if (time1.counter > time2.counter) return  1
+  if (time1.counter > time2.counter) return 1
   if (time1.actorId < time2.actorId) return -1
-  if (time1.actorId > time2.actorId) return  1
+  if (time1.actorId > time2.actorId) return 1
   return 0
 }
 
@@ -721,11 +755,11 @@ function insertionsAfter(opSet, objectId, parentId, childId) {
   if (childId) childKey = Map({opId: childId})
 
   return opSet
-    .getIn(['byObject', objectId, '_following', parentId], List())
-    .filter(op => op.get('insert') && (!childKey || lamportCompare(op, childKey) < 0))
-    .sort(lamportCompare)
-    .reverse() // descending order
-    .map(op => op.get('opId'))
+      .getIn(['byObject', objectId, '_following', parentId], List())
+      .filter(op => op.get('insert') && (!childKey || lamportCompare(op, childKey) < 0))
+      .sort(lamportCompare)
+      .reverse() // descending order
+      .map(op => op.get('opId'))
 }
 
 // function movesAfter(opSet, objectId, parentId, childId) {

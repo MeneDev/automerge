@@ -315,6 +315,32 @@ describe('Automerge.Text', () => {
     assert.strictEqual(s1.text.toString(), s2.text.toString())
   })
 
+  it('should support concurrent ambiguous moving with consecutive insert', () => {
+    let s1 = Automerge.change(Automerge.init('111111'), doc => doc.text = new Automerge.Text())
+    s1 = Automerge.change(s1, doc => doc.text.insertAt(0, 'a', 'b', 'c', 'd'))
+    let s2 = Automerge.merge(Automerge.init('222222'), s1)
+    s1 = Automerge.change(s1, doc => doc.text.moveTo(0, 1))
+    s1 = Automerge.change(s1, doc => doc.text.insertAt(2, 'X'))
+
+    assert.strictEqual(s1.text.length, 5)
+    assert.strictEqual(s1.text.toString(), 'baXcd')
+
+    s2 = Automerge.change(s2, doc => doc.text.moveTo(1, 2))
+
+    assert.strictEqual(s2.text.length, 4)
+    assert.strictEqual(s2.text.toString(), 'acbd')
+
+    s1 = Automerge.merge(s1, s2)
+    assert.strictEqual(s1.text.length, 5)
+    assertEqualsOneOf(s1.text.toString(), 'aXcbd', 'cbaXd')
+
+    s2 = Automerge.merge(s2, s1)
+    assert.strictEqual(s2.text.length, 5)
+    assertEqualsOneOf(s2.text.toString(), 'aXcbd', 'cbaXd')
+
+    assert.strictEqual(s1.text.toString(), s2.text.toString())
+  })
+
   it('should support concurrent conflicting moves', () => {
     s1 = Automerge.change(s1, doc => doc.text.insertAt(0, 'a', 'b', 'c', 'd'))
     let s2 = Automerge.merge(Automerge.init(), s1)

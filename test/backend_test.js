@@ -520,7 +520,7 @@ describe('Automerge.Backend', () => {
       // TODO is order important here?
       assert.deepStrictEqual(new Set(changes[1].ops[3].pred), new Set(['2@111111', '3@111111']))
       assert.deepStrictEqual(new Set(changes[1].ops[4].pred), new Set(['3@111111', '4@111111', '5@111111']))
-      assert.deepStrictEqual(new Set(changes[2].ops[0].pred), new Set(['4@111111', '6@111111']))
+      assert.deepStrictEqual(new Set(changes[2].ops[0].pred), new Set(['2@111111', '6@111111']))
     })
   })
 
