@@ -1,7 +1,7 @@
-const { Map, List, Set, fromJS } = require('immutable')
-const { SkipList } = require('./skip_list')
-const { decodeChange, decodeChangeMeta } = require('./columnar')
-const { ROOT_ID, parseOpId } = require('../src/common')
+const {Map, List, Set, fromJS} = require('immutable')
+const {SkipList} = require('./skip_list')
+const {decodeChange, decodeChangeMeta} = require('./columnar')
+const {ROOT_ID, parseOpId} = require('../src/common')
 
 // Returns true if all changes that causally precede the given change
 // have already been applied in `opSet`.
@@ -66,9 +66,176 @@ function applyInsert(opSet, op) {
   if (opSet.hasIn(['byObject', objectId, '_insertion', opId])) throw new Error(`Duplicate list element ID ${opId}`)
 
   return opSet
-    .updateIn(['byObject', objectId, '_following', op.get('key')], List(), list => list.push(op))
-    .setIn(['byObject', objectId, '_insertion', opId], op)
+      .updateIn(['byObject', objectId, '_following', op.get('key')], List(), list => list.push(op))
+      .setIn(['byObject', objectId, '_insertion', opId], op)
 }
+
+function applyMove(opSet, op, patch) {
+  const objectId = op.get('obj'), opId = op.get('opId')
+  if (!opSet.get('byObject').has(objectId)) throw new Error(`Modification of unknown object ${objectId}`)
+  if (opSet.hasIn(['byObject', objectId, '_insertion', opId])) throw new Error(`Duplicate list element ID ${opId}`)
+
+  if (patch && patch.edits === undefined) {
+    patch.edits = []
+  }
+  if (patch && patch.props === undefined) {
+    patch.props = {}
+  }
+
+  const ops = List(opSet.getIn(['byObject', objectId, '_move'], Map()).values())
+      .concat(List(opSet.getIn(['byObject', objectId, '_insertion'], Map()).values()))
+      .sort(lamportCompare)
+  const opsAfter = ops.skipUntil(other => lamportCompare(op, other) < 0)
+
+  let elemIds = opSet.getIn(['byObject', objectId, '_elemIds'], false)
+
+  const inserts = []
+  // undo all moves in movesAfter, reverse order
+  elemIds = opsAfter.reduceRight((elemIds, op) =>
+      op.get('action') === 'mov'
+          ? _applyMove(opId, elemIds, op, patch, inserts, true)
+          : _uninsert(opId, elemIds, op, patch, inserts)
+  , elemIds)
+  // apply op
+  elemIds = _applyMove(opId, elemIds, op, patch, inserts, false)
+  // apply undone moves again
+  elemIds = opsAfter.reduce((elemIds, op) =>
+          op.get('action') === 'mov'
+              ? _applyMove(opId, elemIds, op, patch, inserts, false)
+              : _reinsert(opSet, objectId, opId, elemIds, op, patch, inserts)
+      , elemIds)
+
+  for (let inserted of new Set(inserts)) {
+    let val = elemIds.getValue(inserted)
+    let idx = elemIds.indexOf(inserted)
+    patch.props[idx] = {}
+    patch.props[idx][opId] = {value: val}
+  }
+
+  return opSet
+      .setIn(['byObject', objectId, '_elemIds'], elemIds)
+      .setIn(['byObject', objectId, '_move', opId], op)
+}
+function _uninsert(opId, elemIds, op, patch, moved, inverse) {
+  const idx = elemIds.indexOf(op.get('opId'))
+  if (patch) patch.edits.push({action: 'remove', index: idx})
+  return elemIds.removeIndex(idx)
+}
+
+function _reinsert(opSet, objectId, opId, elemIds, op, patch, inserts) {
+  const elemId = op.get('opId')
+  let prevId = op.get('key')
+  let index = elemIds.indexOf(prevId)
+  // while (true) {
+  //   index = -1
+  //   prevId = getPrevious(opSet, objectId, prevId)
+  //   if (!prevId) break
+  //   index = elemIds.indexOf(prevId)
+  //   if (index >= 0) break
+  // }
+
+  index += 1
+  if (patch) patch.edits.push({action: 'insert', index})
+
+  inserts.push(elemId)
+  return elemIds.insertIndex(index, elemId, op.get('value'))
+}
+
+function _applyMove(opId, elemIds, op, patch, inserts, inverse) {
+  const key = op.get('key'), child = op.get('child')
+
+  let dest = inverse ? child : key;
+  let source = inverse ? key : child;
+
+  let idxDest = inverse ? elemIds.indexOf(dest) : (dest === '_head' ? -1 : elemIds.indexOf(dest))
+
+  let idxSource = inverse ? (source === '_head' ? -1 : elemIds.indexOf(source)) : elemIds.indexOf(source)
+  let valChild = elemIds.getValue(source)
+
+  elemIds = elemIds.removeIndex(idxSource)
+  if (patch) patch.edits.push({action: 'remove', index: idxSource})
+
+  if (idxDest < idxSource) {
+    idxDest++
+  }
+
+  elemIds = elemIds.insertIndex(idxDest, source, valChild)
+
+  if (patch) patch.edits.push({action: 'insert', index: idxDest})
+
+  inserts.push(source)
+  return elemIds
+}
+
+// function _applyMove2(opId, elemIds, op, patch, inverse) {
+//   const key = op.get('key'), child = op.get('child')
+//
+//   let dest = inverse ? child : key;
+//   let source = inverse ? key : child;
+//
+//   let idxDest = inverse ? elemIds.indexOf(dest) : (dest === '_head' ? -1 : elemIds.indexOf(dest))
+//
+//   let idxSource = inverse ? (source === '_head' ? -1 : elemIds.indexOf(source)): elemIds.indexOf(source)
+//   let valChild = elemIds.getValue(source)
+//
+//   elemIds = elemIds.removeIndex(idxSource)
+//   if (patch) patch.edits.push({action: 'remove', index: idxSource})
+//
+//   // if (patch && patch.props[idxDest]) {
+//   //   const v = patch.props[idxDest]
+//   //   //
+//   //   // patch.props[idxDest -1] = v
+//   // }
+//
+//   if (patch && patch.props[idxSource]) {
+//     delete patch.props[idxSource]
+//   }
+//
+//   if (patch) {
+//     const keys = Object.keys(patch.props).map(k => parseInt(k)).sort((a, b) => a - b)
+//     let p = {}
+//     for (let key of keys) {
+//       const value = patch.props[key]
+//       if (idxSource < key) {
+//         p[key - 1] = value
+//       } else {
+//         p[key] = value
+//       }
+//     }
+//     patch.props = p
+//   }
+//
+//   // TODO that doesn't seem right?
+//   if (idxDest < idxSource) {
+//     idxDest++
+//   }
+//   // if (idxSource < idxDest) {
+//   //   idxDest--
+//   // }
+//
+//
+//   elemIds = elemIds.insertIndex(idxDest, source, valChild)
+//
+//   if (patch) {
+//     const keys = Object.keys(patch.props).map(k => parseInt(k)).sort((a, b) => b - a)
+//     let p = {}
+//     for (let key of keys) {
+//       const value = patch.props[key]
+//       if (idxDest <= key) {
+//         p[key + 1] = value
+//       } else {
+//         p[key] = value
+//       }
+//     }
+//     patch.props = p
+//   }
+//   if (patch) patch.edits.push({action: 'insert', index: idxDest})
+//
+//   patch.props[idxDest] = {}
+//   patch.props[idxDest][opId] = {value: valChild}
+//
+//   return elemIds
+// }
 
 function updateListElement(opSet, objectId, elemId, patch) {
   const ops = getFieldOps(opSet, objectId, elemId)
@@ -215,8 +382,8 @@ function applyAssign(opSet, op, patch) {
     })
   } else {
     const priorOpsOverwritten = ops.groupBy(other => op.get('pred').includes(other.get('opId')))
-    overwritten = priorOpsOverwritten.get(true,  List())
-    remaining   = priorOpsOverwritten.get(false, List())
+    overwritten = priorOpsOverwritten.get(true, List())
+    remaining = priorOpsOverwritten.get(false, List())
   }
 
   // If any child object references were overwritten, remove them from the index of inbound links
@@ -250,7 +417,7 @@ function initializePatch(opSet, pathOp, patch) {
   const objectId = pathOp.get('obj'), opId = pathOp.get('opId'), key = getOperationKey(pathOp)
   const type = getObjectType(opSet, objectId)
   patch.objectId = patch.objectId || objectId
-  patch.type     = patch.type     || type
+  patch.type = patch.type || type
 
   if (patch.objectId !== objectId) {
     throw new RangeError(`objectId mismatch in path: ${patch.objectId} != ${objectId}`)
@@ -346,7 +513,7 @@ function applyOps(opSet, change, patch) {
   let newObjects = Set()
   change.get('ops').forEach((op, index) => {
     const action = op.get('action'), obj = op.get('obj'), insert = op.get('insert')
-    if (!['set', 'del', 'inc', 'link', 'makeMap', 'makeList', 'makeText', 'makeTable'].includes(action)) {
+    if (!['set', 'del', 'inc', 'link', 'makeMap', 'makeList', 'makeText', 'makeTable', 'mov'].includes(action)) {
       throw new RangeError(`Unknown operation action: ${action}`)
     }
     if (!op.get('pred')) {
@@ -364,13 +531,19 @@ function applyOps(opSet, change, patch) {
     if (insert) {
       opSet = applyInsert(opSet, opWithId)
     }
+    if (action === 'mov') {
+      opSet = applyMove(opSet, opWithId, localPatch)
+    }
     if (action.startsWith('make')) {
       newObjects = newObjects.add(getChildId(opWithId))
     }
     if (!newObjects.contains(obj)) {
       opSet = recordUndoHistory(opSet, opWithId)
     }
-    opSet = applyAssign(opSet, opWithId, localPatch)
+    if (action !== 'mov') {
+      // applyAssign is designed to update a single element, but move will update at least 2
+      opSet = applyAssign(opSet, opWithId, localPatch)
+    }
   })
   return opSet
 }
@@ -426,11 +599,11 @@ function applyChange(opSet, binaryChange, patch) {
 
   opSet = applyOps(opSet, change, patch)
   return opSet
-    .setIn(['hashes', hash], changeInfo)
-    .updateIn(['states', actor], List(), prior => prior.push(hash))
-    .update('deps', deps => deps.subtract(change.get('deps')).add(hash))
-    .update('maxOp', maxOp => Math.max(maxOp, changeInfo.get('maxOpId')))
-    .update('history', history => history.push(hash))
+      .setIn(['hashes', hash], changeInfo)
+      .updateIn(['states', actor], List(), prior => prior.push(hash))
+      .update('deps', deps => deps.subtract(change.get('deps')).add(hash))
+      .update('maxOp', maxOp => Math.max(maxOp, changeInfo.get('maxOpId')))
+      .update('history', history => history.push(hash))
 }
 
 function applyQueuedOps(opSet, patch) {
@@ -453,28 +626,28 @@ function applyQueuedOps(opSet, patch) {
 function pushUndoHistory(opSet) {
   const undoPos = opSet.get('undoPos')
   return opSet
-    .update('undoStack', stack => {
-      return stack
-        .slice(0, undoPos)
-        .push(opSet.get('undoLocal'))
-    })
-    .set('undoPos', undoPos + 1)
-    .set('redoStack', List())
-    .remove('undoLocal')
+      .update('undoStack', stack => {
+        return stack
+            .slice(0, undoPos)
+            .push(opSet.get('undoLocal'))
+      })
+      .set('undoPos', undoPos + 1)
+      .set('redoStack', List())
+      .remove('undoLocal')
 }
 
 function init() {
   return Map()
-    .set('states',   Map())
-    .set('history',  List())
-    .set('byObject', Map().set(ROOT_ID, Map().set('_keys', Map())))
-    .set('hashes',   Map())
-    .set('deps',     Set())
-    .set('maxOp',     0)
-    .set('undoPos',   0)
-    .set('undoStack', List())
-    .set('redoStack', List())
-    .set('queue',    List())
+      .set('states', Map())
+      .set('history', List())
+      .set('byObject', Map().set(ROOT_ID, Map().set('_keys', Map())))
+      .set('hashes', Map())
+      .set('deps', Set())
+      .set('maxOp', 0)
+      .set('undoPos', 0)
+      .set('undoStack', List())
+      .set('redoStack', List())
+      .set('queue', List())
 }
 
 /**
@@ -529,18 +702,18 @@ function getMissingChanges(opSet, haveDeps) {
   }
 
   return opSet.get('history')
-    .filter(hash => !seenHashes[hash])
-    .map(hash => opSet.getIn(['hashes', hash, 'change']))
-    .toJSON()
+      .filter(hash => !seenHashes[hash])
+      .map(hash => opSet.getIn(['hashes', hash, 'change']))
+      .toJSON()
 }
 
 function getChangesForActor(opSet, forActor, afterSeq) {
   afterSeq = afterSeq || 0
 
   return opSet.getIn(['states', forActor], List())
-    .skip(afterSeq)
-    .map(hash => opSet.getIn(['hashes', hash, 'change']))
-    .toJSON()
+      .skip(afterSeq)
+      .map(hash => opSet.getIn(['hashes', hash, 'change']))
+      .toJSON()
 }
 
 function getMissingDeps(opSet) {
@@ -561,17 +734,19 @@ function getFieldOps(opSet, objectId, key) {
 
 function getParent(opSet, objectId, key) {
   if (key === '_head') return
+  // the ins operation that created the element with given key
   const insertion = opSet.getIn(['byObject', objectId, '_insertion', key])
   if (!insertion) throw new TypeError(`Missing index entry for list element ${key}`)
+  // element to insert after
   return insertion.get('key')
 }
 
 function lamportCompare(op1, op2) {
   const time1 = parseOpId(op1.get('opId')), time2 = parseOpId(op2.get('opId'))
   if (time1.counter < time2.counter) return -1
-  if (time1.counter > time2.counter) return  1
+  if (time1.counter > time2.counter) return 1
   if (time1.actorId < time2.actorId) return -1
-  if (time1.actorId > time2.actorId) return  1
+  if (time1.actorId > time2.actorId) return 1
   return 0
 }
 
@@ -580,12 +755,24 @@ function insertionsAfter(opSet, objectId, parentId, childId) {
   if (childId) childKey = Map({opId: childId})
 
   return opSet
-    .getIn(['byObject', objectId, '_following', parentId], List())
-    .filter(op => op.get('insert') && (!childKey || lamportCompare(op, childKey) < 0))
-    .sort(lamportCompare)
-    .reverse() // descending order
-    .map(op => op.get('opId'))
+      .getIn(['byObject', objectId, '_following', parentId], List())
+      .filter(op => op.get('insert') && (!childKey || lamportCompare(op, childKey) < 0))
+      .sort(lamportCompare)
+      .reverse() // descending order
+      .map(op => op.get('opId'))
 }
+
+// function movesAfter(opSet, objectId, parentId, childId) {
+//   let childKey = null
+//   if (childId) childKey = Map({opId: childId})
+//
+//   return opSet
+//       .getIn(['byObject', objectId, '_movedAfter', parentId], List())
+//       .filter(op => op.get('move') && (!childKey || lamportCompare(op, childKey) < 0))
+//       .sort(lamportCompare)
+//       .reverse() // descending order
+//       .map(op => op.get('opId'))
+// }
 
 function getNext(opSet, objectId, key) {
   const children = insertionsAfter(opSet, objectId, key)
@@ -604,12 +791,17 @@ function getNext(opSet, objectId, key) {
 // Given the ID of a list element, returns the ID of the immediate predecessor list element,
 // or null if the given list element is at the head.
 function getPrevious(opSet, objectId, key) {
+  // id after which was originally inserted
   const parentId = getParent(opSet, objectId, key)
+
+  // other insertions after the parent in lamport order
   let children = insertionsAfter(opSet, objectId, parentId)
   if (children.first() === key) {
+    // the first element after the parent equals key -> parentId is previous
     if (parentId === '_head') return null; else return parentId;
   }
 
+  // concurrent insertion
   let prevId
   for (let child of children) {
     if (child === key) break
@@ -621,6 +813,50 @@ function getPrevious(opSet, objectId, key) {
     prevId = children.last()
   }
 }
+
+// // Given the ID of a list element, returns the ID of the immediate predecessor list element,
+// // or null if the given list element is at the head.
+// function getPrevious(opSet, objectId, key) {
+//   // id after which was originally inserted
+//   // TODO rename, if "parent" is supposed to mean "inserted after"
+//   let parentId = getParent(opSet, objectId, key)
+//   // if element with parentId was moved, skip to element before
+//   while (true) {
+//     const moves = movesAfter(opSet, objectId, parentId)
+//     const moved = !moves.isEmpty()
+//     if (!moved) {
+//       break
+//     }
+//     const beforeParent = getPrevious(opSet, objectId, parentId)
+//     // potentially the element can be moved around several times (or even just once)
+//     // and end up in the same spot again
+//     const moveOp = moves.last()
+//     if (moveOp.key === beforeParent) {
+//       break
+//     }
+//
+//     parentId = beforeParent
+//   }
+//
+//   // other insertions after the parent in lamport order
+//   let children = insertionsAfter(opSet, objectId, parentId)
+//   if (children.first() === key) {
+//     // the first element after the parent is key -> parentId is previous
+//     if (parentId === '_head') return null; else return parentId;
+//   }
+//
+//   // concurrent insertion
+//   let prevId
+//   for (let child of children) {
+//     if (child === key) break
+//     prevId = child
+//   }
+//   while (true) {
+//     children = insertionsAfter(opSet, objectId, prevId)
+//     if (children.isEmpty()) return prevId
+//     prevId = children.last()
+//   }
+// }
 
 function constructField(opSet, op) {
   if (isChildOp(op)) {
@@ -683,5 +919,5 @@ function constructObject(opSet, objectId) {
 
 module.exports = {
   init, addChange, addLocalChange, getMissingChanges, getChangesForActor, getMissingDeps,
-  constructObject, getFieldOps, getOperationKey, finalizePatch, ROOT_ID
+  constructObject, getFieldOps, getOperationKey, finalizePatch, parseOpId, ROOT_ID
 }
